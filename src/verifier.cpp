@@ -37,12 +37,10 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
         std::mt19937_64 vrng(0xDEADBEEF);
         for (int i = 0; i < bl; ++i) {
             r_points[last][i] = F61::rand(vrng);
-            std::cerr << "VRNG[" << i << "] = " << r_points[last][i].v << "\n";
         }
     }
 
     F61 current_claim = mle_eval(witness[n_layers - 1].vals, r_points[n_layers - 1]);
-    std::cerr << "Verifier initial claim: " << current_claim.v << "\n";
 
     int tx_idx = 0;
     int fold_idx = 0;
