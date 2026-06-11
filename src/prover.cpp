@@ -199,7 +199,15 @@ SumcheckTranscript Prover::prove_layer(int lid, const std::vector<F61> &r_out,
             s2 += bk2 * mt2;
         }
 
-        QuadPoly poly(s2 + s0 - s1 - s1, s1 - s0, s0);
+        F61 half_mod((MOD + 1) / 2);
+        F61 a = (s2 + s0 - (s1 + s1)) * half_mod;
+        F61 b = s1 - s0 - a;
+        QuadPoly poly(a, b, s0);
+        if (j == 0) {
+            std::cerr << "PROVER R0: s0=" << s0.v << " s1=" << s1.v << " s2=" << s2.v << "\n";
+            std::cerr << "PROVER R0 poly(0)=" << poly.eval(F61::zero()).v << " poly(1)=" << poly.eval(F61::one()).v << "\n";
+            std::cerr << "PROVER R0 check=" << (poly.eval(F61::zero()) + poly.eval(F61::one())).v << "\n";
+        }
         tx.round_polys.push_back(poly);
         tx.byte_size += 3 * 8;
 
@@ -231,8 +239,10 @@ Prover::ProveResult Prover::prove(const ModelGraph &g) {
         int last = n_layers - 1;
         int bl = witness[last].bit_length;
         r_points[last].resize(bl);
-        for (int i = 0; i < bl; ++i)
+        for (int i = 0; i < bl; ++i) {
             r_points[last][i] = F61::rand(rng);
+            std::cerr << "PRNG[" << i << "] = " << r_points[last][i].v << "\n";
+        }
     }
 
     for (int l = n_layers - 1; l >= 1; --l) {

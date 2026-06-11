@@ -35,11 +35,14 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
         int bl = witness[last].bit_length;
         r_points[last].resize(bl);
         std::mt19937_64 vrng(0xDEADBEEF);
-        for (int i = 0; i < bl; ++i)
+        for (int i = 0; i < bl; ++i) {
             r_points[last][i] = F61::rand(vrng);
+            std::cerr << "VRNG[" << i << "] = " << r_points[last][i].v << "\n";
+        }
     }
 
     F61 current_claim = mle_eval(witness[n_layers - 1].vals, r_points[n_layers - 1]);
+    std::cerr << "Verifier initial claim: " << current_claim.v << "\n";
 
     int tx_idx = 0;
     int fold_idx = 0;
@@ -57,19 +60,19 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
             F61 expected = mle_eval(witness[l].vals, r_points[l]);
             if (sum_check != expected) {
                 res.accepted = false;
-                break;
+                // break;
             }
 
             if (fold_idx < (int)proof.fold_states.size()) {
                 auto &fs = proof.fold_states[fold_idx];
                 if (fs.claim_main != v1 || fs.claim_skip != v2) {
                     res.accepted = false;
-                    break;
+                    // break;
                 }
                 F61 recomputed = fs.claim_main + fs.alpha * fs.claim_skip;
                 if (recomputed != fs.folded) {
                     res.accepted = false;
-                    break;
+                    // break;
                 }
                 ++fold_idx;
             }
@@ -99,15 +102,15 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
             F61 check = poly.eval(F61::zero()) + poly.eval(F61::one());
             if (check != running) {
                 res.accepted = false;
-                break;
+                // break; // Disabled to get full profiling
             }
             running = poly.eval(tx.challenges[j]);
         }
-        if (!res.accepted) break;
+        // if (!res.accepted) break; // Disabled to get full profiling
 
         if (running != tx.final_claim) {
             res.accepted = false;
-            break;
+            // break; // Disabled to get full profiling
         }
 
         int in_id = desc.input_ids[0];

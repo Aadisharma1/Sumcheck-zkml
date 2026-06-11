@@ -11,6 +11,25 @@ namespace fs = std::filesystem;
 static void build_resnet18_graph(ModelGraph &g, const std::string &weight_dir) {
     g.set_frac_bits(16);
 
+    std::vector<std::string> tags;
+    for (auto &entry : fs::directory_iterator(weight_dir)) {
+        std::string name = entry.path().filename().string();
+        if (name.find("_meta.txt") != std::string::npos) {
+            std::string tag = name.substr(0, name.find("_meta.txt"));
+            if (tag == "input") continue;
+            tags.push_back(tag);
+        }
+    }
+    std::sort(tags.begin(), tags.end());
+
+    std::cerr << "found " << tags.size() << " weight tags\n";
+    for (auto &t : tags) std::cerr << "  " << t << "\n";
+
+    if (tags.size() < 21) {
+        std::cerr << "FATAL: expected 21 weight tags for ResNet-18, got " << tags.size() << "\n";
+        return;
+    }
+
     int lid = 0;
     auto add_conv = [&](int in_id, const std::string &tag, int in_h, int in_w) -> int {
         std::string meta_path = weight_dir + "/" + tag + "_meta.txt";
@@ -32,7 +51,7 @@ static void build_resnet18_graph(ModelGraph &g, const std::string &weight_dir) {
         g.layers.push_back(d);
         g.weights.resize(lid + 1);
         g.biases.resize(lid + 1);
-        g.weights[lid] = g.load_bin(w_path, cm.c_out * cm.c_in * cm.kh * cm.kw);
+        g.weights[lid] = g.load_bin(w_path, cm.c_out * (cm.c_in / cm.groups) * cm.kh * cm.kw);
         g.biases[lid] = g.load_bin(b_path, cm.c_out);
 
         return lid++;
@@ -125,9 +144,10 @@ static void build_resnet18_graph(ModelGraph &g, const std::string &weight_dir) {
         return lid++;
     };
 
+    // layer 0: input placeholder
     {
         LayerDesc d{};
-        d.type = LayerType::CONV;
+        d.type = LayerType::FLATTEN;
         d.id = 0;
         d.input_ids[0] = -1;
         d.num_inputs = 0;
@@ -137,111 +157,50 @@ static void build_resnet18_graph(ModelGraph &g, const std::string &weight_dir) {
         g.biases.resize(1);
         lid = 1;
     }
-    g.layers[0].type = LayerType::FLATTEN;
-
-    std::vector<std::string> tags;
-    for (auto &entry : fs::directory_iterator(weight_dir)) {
-        std::string name = entry.path().filename().string();
-        if (name.find("_meta.txt") != std::string::npos) {
-            std::string tag = name.substr(0, name.find("_meta.txt"));
-            tags.push_back(tag);
-        }
-    }
-    std::sort(tags.begin(), tags.end());
 
     int cur = 0;
-    int h = 32, w = 32;
+    int idx = 0;
 
-    auto find_tag = [&](const std::string &substr) -> std::string {
-        for (auto &t : tags)
-            if (t.find(substr) != std::string::npos) return t;
-        return "";
+    // tags[0] = 000_conv1
+    int c0 = add_conv(cur, tags[idx++], 32, 32);
+    int r0 = add_relu(c0);
+    cur = r0;
+
+    // tags[1..20]: 8 basic blocks + FC
+    // layer1: blocks 0,1 (no downsample)
+    // layer2: block 0 (downsample), block 1
+    // layer3: block 0 (downsample), block 1
+    // layer4: block 0 (downsample), block 1
+    auto basic_block = [&](int in_id, bool has_ds) -> int {
+        auto &pin = g.layers[in_id];
+        int c1 = add_conv(in_id, tags[idx++], pin.out_h, pin.out_w);
+        int r1 = add_relu(c1);
+        auto &pr1 = g.layers[r1];
+        int c2 = add_conv(r1, tags[idx++], pr1.out_h, pr1.out_w);
+
+        int skip = in_id;
+        if (has_ds) {
+            skip = add_conv(in_id, tags[idx++], pin.out_h, pin.out_w);
+        }
+
+        int a = add_add(c2, skip);
+        return add_relu(a);
     };
 
-    auto conv_tag = find_tag("conv1");
-    if (conv_tag.empty()) {
-        std::cerr << "no conv1 found in tags, using index-based fallback\n";
-        if (tags.size() >= 21) {
-            int idx = 0;
+    cur = basic_block(cur, false);  // layer1.0
+    cur = basic_block(cur, false);  // layer1.1
+    cur = basic_block(cur, true);   // layer2.0 (ds)
+    cur = basic_block(cur, false);  // layer2.1
+    cur = basic_block(cur, true);   // layer3.0 (ds)
+    cur = basic_block(cur, false);  // layer3.1
+    cur = basic_block(cur, true);   // layer4.0 (ds)
+    cur = basic_block(cur, false);  // layer4.1
 
-            int c0 = add_conv(cur, tags[idx++], h, w);
-            int r0 = add_relu(c0);
-            cur = r0;
-
-            auto basic_block = [&](int in_id, int &conv_idx, bool has_ds) -> int {
-                auto &pin = g.layers[in_id];
-                int c1 = add_conv(in_id, tags[conv_idx++], pin.out_h, pin.out_w);
-                int r1 = add_relu(c1);
-                auto &pr1 = g.layers[r1];
-                int c2 = add_conv(r1, tags[conv_idx++], pr1.out_h, pr1.out_w);
-
-                int skip = in_id;
-                if (has_ds) {
-                    skip = add_conv(in_id, tags[conv_idx++], pin.out_h, pin.out_w);
-                }
-
-                int a = add_add(c2, skip);
-                return add_relu(a);
-            };
-
-            cur = basic_block(cur, idx, false);
-            cur = basic_block(cur, idx, false);
-            cur = basic_block(cur, idx, true);
-            cur = basic_block(cur, idx, false);
-            cur = basic_block(cur, idx, true);
-            cur = basic_block(cur, idx, false);
-            cur = basic_block(cur, idx, true);
-            cur = basic_block(cur, idx, false);
-
-            auto &plast = g.layers[cur];
-            int pool = add_avgpool(cur, plast.out_h);
-            int flat = add_flatten(pool);
-            add_fc(flat, tags[idx]);
-        }
-    } else {
-        int c0 = add_conv(cur, conv_tag, h, w);
-        int r0 = add_relu(c0);
-        cur = r0;
-
-        auto try_basic_block = [&](const std::string &prefix, int in_id) -> int {
-            std::string t_c1 = find_tag(prefix + "_0_conv1");
-            std::string t_c2 = find_tag(prefix + "_0_conv2");
-            std::string t_ds = find_tag(prefix + "_0_downsample_0");
-
-            if (t_c1.empty()) {
-                t_c1 = find_tag(prefix + "0_conv1");
-                t_c2 = find_tag(prefix + "0_conv2");
-                t_ds = find_tag(prefix + "0_downsample");
-            }
-            if (t_c1.empty()) return in_id;
-
-            auto &pin = g.layers[in_id];
-            int c1 = add_conv(in_id, t_c1, pin.out_h, pin.out_w);
-            int r1 = add_relu(c1);
-            auto &pr1 = g.layers[r1];
-            int c2 = add_conv(r1, t_c2, pr1.out_h, pr1.out_w);
-
-            int skip = in_id;
-            if (!t_ds.empty()) skip = add_conv(in_id, t_ds, pin.out_h, pin.out_w);
-
-            int a = add_add(c2, skip);
-            return add_relu(a);
-        };
-
-        for (int layer_g = 1; layer_g <= 4; ++layer_g) {
-            std::string prefix = "layer" + std::to_string(layer_g);
-            for (int blk = 0; blk < 2; ++blk) {
-                std::string bp = prefix + "_" + std::to_string(blk);
-                cur = try_basic_block(bp, cur);
-            }
-        }
-
-        auto &plast = g.layers[cur];
-        int pool = add_avgpool(cur, plast.out_h);
-        int flat = add_flatten(pool);
-        std::string fc_tag = find_tag("fc");
-        if (!fc_tag.empty()) add_fc(flat, fc_tag);
-    }
+    // idx should now be 20 (tags[20] = 020_fc)
+    auto &plast = g.layers[cur];
+    int pool = add_avgpool(cur, plast.out_h);
+    int flat = add_flatten(pool);
+    add_fc(flat, tags[idx]);
 }
 
 int main(int argc, char **argv) {
