@@ -20,7 +20,7 @@ struct QuadPoly {
         return *this;
     }
 };
-
+// cubic poly, might cause issues, have to check.
 struct CubicPoly {
     F61 a, b, c, d;
     CubicPoly() {}
