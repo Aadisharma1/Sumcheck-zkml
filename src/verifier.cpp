@@ -101,15 +101,12 @@ if (desc.type == LayerType::ADD) {
             F61 check = poly.eval(F61::zero()) + poly.eval(F61::one());
             if (check != running) {
                 res.accepted = false;
-                // break; // Disabled to get full profiling
             }
             running = poly.eval(tx.challenges[j]);
         }
-        // if (!res.accepted) break; // Disabled to get full profiling
 
         if (running != tx.final_claim) {
             res.accepted = false;
-            // break; // Disabled to get full profiling
         }
 
         int in_id = desc.input_ids[0];
