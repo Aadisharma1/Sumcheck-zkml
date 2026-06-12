@@ -42,14 +42,7 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
     }
 
     F61 current_claim = mle_eval(witness[n_layers - 1].vals, r_points[n_layers - 1]);
-
-    int tx_idx = 0;
-    int fold_idx = 0;
-
-    for (int l = n_layers - 1; l >= 1; --l) {
-        auto &desc = g.layers[l];
-
-        if (desc.type == LayerType::ADD) {
+if (desc.type == LayerType::ADD) {
             int id_a = desc.input_ids[0], id_b = desc.input_ids[1];
 
             F61 v1 = mle_eval(witness[id_a].vals, r_points[l]);
@@ -57,22 +50,14 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
 
             F61 sum_check = v1 + v2;
             F61 expected = mle_eval(witness[l].vals, r_points[l]);
-            if (sum_check != expected) {
-                res.accepted = false;
-                // break;
-            }
+            if (sum_check != expected) res.accepted = false;
 
             if (fold_idx < (int)proof.fold_states.size()) {
                 auto &fs = proof.fold_states[fold_idx];
-                if (fs.claim_main != v1 || fs.claim_skip != v2) {
-                    res.accepted = false;
-                    // break;
-                }
+                if (fs.claim_main != v1 || fs.claim_skip != v2) res.accepted = false;
+                
                 F61 recomputed = fs.claim_main + fs.alpha * fs.claim_skip;
-                if (recomputed != fs.folded) {
-                    res.accepted = false;
-                    // break;
-                }
+                if (recomputed != fs.folded) res.accepted = false;
                 ++fold_idx;
             }
 
@@ -92,6 +77,21 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
             break;
         }
 
+        auto &tx = proof.transcripts[tx_idx];
+        int num_rounds = tx.round_polys.size();
+
+        F61 running = current_claim;
+        for (int j = 0; j < num_rounds; ++j) {
+            auto &poly = tx.round_polys[j];
+            F61 check = poly.eval(F61::zero()) + poly.eval(F61::one());
+            if (check != running) res.accepted = false;
+            running = poly.eval(tx.challenges[j]);
+        }
+
+        if (running != tx.final_claim) res.accepted = false;
+
+        int in_id = desc.input_ids[0];
+        r_points[in_id] = tx.challenges;
         auto &tx = proof.transcripts[tx_idx];
         int num_rounds = tx.round_polys.size();
 
