@@ -1,4 +1,3 @@
-//this code is working, do not touch at all costs, any touching is breaking
 #include "verifier.hpp"
 #include <chrono>
 
@@ -42,7 +41,13 @@ Verifier::VerifyResult Verifier::verify(const Prover::ProveResult &proof,
     }
 
     F61 current_claim = mle_eval(witness[n_layers - 1].vals, r_points[n_layers - 1]);
-if (desc.type == LayerType::ADD) {
+    int tx_idx = 0;
+    int fold_idx = 0;
+
+    for (int l = n_layers - 1; l > 0; --l) {
+        auto &desc = g.layers[l];
+
+        if (desc.type == LayerType::ADD) {
             int id_a = desc.input_ids[0], id_b = desc.input_ids[1];
 
             F61 v1 = mle_eval(witness[id_a].vals, r_points[l]);
@@ -92,25 +97,7 @@ if (desc.type == LayerType::ADD) {
 
         int in_id = desc.input_ids[0];
         r_points[in_id] = tx.challenges;
-        auto &tx = proof.transcripts[tx_idx];
-        int num_rounds = tx.round_polys.size();
-
-        F61 running = current_claim;
-        for (int j = 0; j < num_rounds; ++j) {
-            auto &poly = tx.round_polys[j];
-            F61 check = poly.eval(F61::zero()) + poly.eval(F61::one());
-            if (check != running) {
-                res.accepted = false;
-            }
-            running = poly.eval(tx.challenges[j]);
-        }
-
-        if (running != tx.final_claim) {
-            res.accepted = false;
-        }
-
-        int in_id = desc.input_ids[0];
-        r_points[in_id] = tx.challenges;
+        
         if ((int)r_points[in_id].size() < witness[in_id].bit_length) {
             r_points[in_id].resize(witness[in_id].bit_length);
             std::mt19937_64 vrng2(0xDEADBEEF + l);
