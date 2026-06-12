@@ -1,52 +1,51 @@
-# Technical Writeup: Sumcheck ZKML for ResNet-18
+# writeup — sumcheck zkml resnet18
 
-## 1. Graph Representation
-The system handles ResNet-18 inference via a two-stage pipeline: an offline Python frontend for graph manipulation and a C++ sumcheck backend. The graph is ingested into the C++ backend as a sequence of procedural struct definitions (`LayerDesc`) mapping to flat `float32` binaries. 
+## graph representation
 
-ResNet-18's topology is unrolled. `BasicBlock` modules are flattened into sequential `CONV -> RELU -> CONV -> ADD -> RELU` nodes. To manage the $H(x) = F(x) + x$ skip connections, the `ADD` nodes hold dual pointers to the upstream layers to trigger the claim folding protocol during the verifier's backward pass.
+resnet18 gets unrolled into a flat DAG of layer nodes. each BasicBlock becomes CONV -> RELU -> CONV -> ADD -> RELU. the ADD nodes hold two input pointers (residual branch + skip) so the verifier knows where to trigger claim folding during the backward pass.
 
-## 2. Offline BatchNorm Fusion & Soundness
-Arithmetizing BatchNorm directly in the sumcheck circuit requires computing the inverse square root of the variance $(\sigma^2 + \epsilon)^{-1/2}$ over $\mathbb{F}_p$. This injects high-degree constraints and necessitates range proofs, needlessly blowing up the prover time.
+the python script handles all the pytorch-side stuff — loads pretrained resnet18, swaps the 7x7 stem to 3x3 (cifar10 is 32x32, the default stem would crush spatial dims), kills maxpool with nn.Identity(), fuses batchnorm, and dumps flat f32 binaries. the c++ backend just ingests those.
 
-Because inference statistics are frozen, BatchNorm is simply an affine transformation. We handle this offline by algebraically fusing the BN parameters $(\mu, \sigma^2, \gamma, \beta)$ into the preceding `Conv2d` layer's weights and biases.
+## batchnorm fusion
 
-Let $\lambda = \gamma / \sqrt{\sigma^2 + \epsilon}$. The fused weights are:
-$W_{\text{fused}} = \lambda \cdot W$
-$b_{\text{fused}} = \lambda \cdot (b_{\text{conv}} - \mu) + \beta$
+bn during inference is just an affine map per channel. let λ = γ / sqrt(σ² + ε). then:
 
-**Soundness:** This is mathematically exact. The composition of two affine operations (Convolution and frozen BatchNorm) is just another affine operation. The verifier does not need to know BN ever existed in the original graph. The C++ backend ingests these fused tensors directly. Equivalence is verified in `fusion_export.py` to an ATOL of $1e-4$.
+- W_fused = λ · W
+- b_fused = λ · (b_conv - μ) + β
 
-## 3. Residual Connections & Claim Folding
-ResNet-18's residual connections create a branching computation graph. In a standard GKR sumcheck, evaluating an `ADD` node $H(x) = F(x) + x$ at a random point $r$ spawns two opening claims: $v_1 = \tilde{V}_F(r)$ and $v_2 = \tilde{V}_x(r)$. Left unchecked, the verifier's claim count grows exponentially ($O(2^d)$ for $d$ residual blocks), crushing verifier throughput.
+this is exact, not an approximation. two affine ops composed = one affine op. we verify equivalence in the python script (atol < 1e-4 on a test input, actual error was ~3e-6).
 
-We mitigate this using Random Linear Combination (RLC) claim folding.
-When the verifier hits an `ADD` node, it receives $v_1$ and $v_2$ from the prover.
-1. Verifier checks $v_1 + v_2 = c_{current}$.
-2. Verifier samples a random challenge $\alpha \leftarrow \mathbb{F}_p$.
-3. Verifier folds the claims: $v_{\text{folded}} = v_1 + \alpha v_2$.
+the alternative — arithmetizing bn directly — would require computing (σ² + ε)^{-1/2} over F_p, which means high-degree constraints and range proofs for every bn layer. 20 bn layers in resnet18. not worth it when you can just fold it offline for free.
 
-By Schwartz-Zippel, the probability that the prover can cheat this folded claim is bounded by $1/|\mathbb{F}_p|$. Because we fold immediately at every residual intersection, the downstream claim count is strictly bounded to $O(1)$.
+## residual claim folding
 
-## 4. Hardware Profiling
-Environment: NVIDIA RTX 4050 (Host CPU for C++ execution).
-Field: Mersenne-61 ($p = 2^{61} - 1$)
+the core problem: at an ADD node H(x) = F(x) + x, the verifier gets two claims v1 and v2. if you fork the protocol naively you get 2^d claims after d residual blocks (2^8 = 256 for resnet18).
 
-* **Prover Time:** 185.528 ms
-* **Verifier Time:** 33.1715 ms
-* **Proof Size:** 7904 bytes
+fix: fold immediately with a random challenge α sampled by the verifier.
 
-## 5. Limitations & Assumptions
-1. **ReLU Arithmetization Bypass:** True ReLU arithmetization over $\mathbb{F}_p$ requires bit-decomposition. To isolate the sumcheck throughput for the Convolution/Residual logic in this starter prototype, the C++ backend currently evaluates ReLU in the clear during witness generation, but routes the evaluation point directly through during the sumcheck (`r_points[in_id] = r_points[l]`). A production implementation would require swapping to a low-degree polynomial activation (e.g., $x^2$) or implementing auxiliary range proofs.
-2. **Fixed-Point Arithmetic:** Values are quantized to 16 fractional bits. 
-3. **Commitment Scheme:** The current implementation halts at the sumcheck boundary. A full SNARK would require binding the input layer to a polynomial commitment scheme (e.g., KZG/Hyrax), which is omitted here.
+v_folded = v1 + α · v2
 
-## 6. Prototype Scope, Assumptions, and Cryptographic Limitations
+by schwartz-zippel, cheating probability is 1/|F_p| ≈ 2^{-61}. claim count stays O(1) throughout the entire backward pass.
 
-This submission implements a scoped, custom GKR sumcheck prototype designed specifically to isolate and demonstrate the two core tasks requested: **BatchNorm Algebraic Fusion** and **$O(1)$ Residual Claim Folding**. 
+## profiling
 
-To isolate these mechanics within a runnable, lightweight C++ executable without relying on the heavy dependencies of the full `TAMUCrypto/zkCNN` framework, the following structural limitations were intentionally implemented:
+ran on host cpu (rtx 4050 laptop), mersenne-61 field (p = 2^61 - 1):
 
-1. **Custom Proving Backend:** Rather than modifying the legacy `zkCNN` parser, a custom lightweight prover/verifier backend was written from scratch in C++17 to natively ingest the flattened computation graph and fused binaries generated by `fusion_export.py`.
-2. **Hollowed Convolution Arithmetization:** The sumcheck implementation currently verifies the layer-to-layer MLE routing (proving the boolean hypercube identities) but deliberately omits the weight/bias arithmetization step ($V_{out} = V_{in} \cdot W$). The verifier trusts the forward pass structure to demonstrate the *routing* of the folded claims at the `ADD` nodes, rather than the full cryptographic commitment to the weights.
-3. **ReLU and Non-Linearity Bypass:** True ReLU arithmetization over $\mathbb{F}_p$ requires bit-decomposition and range proofs, which obfuscates the sumcheck latency metrics. The verifier passes the random evaluation points directly through the non-linear layers (`r_points[in_id] = r_points[l]`).
-4. **CIFAR-10 Architectural Modifications:** Standard ResNet-18 uses a 7x7 stem and a MaxPool layer, which aggressively downsamples CIFAR-10's 32x32 spatial dimensions, destroying accuracy. The offline fusion script explicitly replaces the stem with a 3x3 Convolution and strips the MaxPool layer (`model.maxpool = nn.Identity()`), maintaining the 32x32 resolution into the first residual block.
+- prover: 185.5 ms
+- verifier: 33.2 ms  
+- proof size: 7904 bytes
+- graph: 49 layers, 22 sumcheck transcripts, 8 residual folds
+
+## limitations
+
+1. **relu bypass** — relu arithmetization needs bit decomposition / range proofs. we evaluate relu in the clear during witness gen and pass the eval point straight through in the sumcheck. a real implementation would swap to x² activation or do the aux bit stuff.
+
+2. **hollowed conv arithmetization** — the sumcheck proves layer-to-layer MLE routing but doesn't bind the weight tensors into the proof. verifier never commits to g.weights. this is the biggest gap — a real conv arithmetization needs V_out = V_in · W.
+
+3. **custom backend** — this is not a fork of TAMUCrypto/zkCNN. it's a from-scratch c++17 prover/verifier built to natively ingest the fused binaries. the tradeoff was speed of implementation vs using the full zkCNN framework with its heavier dependencies.
+
+4. **no polynomial commitment** — stops at the sumcheck boundary. full snark would need kzg/hyrax for the input layer binding.
+
+5. **cifar10 arch mods** — stem swapped to 3x3 conv, maxpool replaced with identity. this is standard practice for cifar10 resnet variants to preserve spatial resolution.
+
+6. **field** — mersenne-61 is fast (single-word arithmetic, no gmp) but too small for real crypto security. production would use bls12-381.

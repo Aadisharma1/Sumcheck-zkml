@@ -1,3 +1,4 @@
+*.pdf
 build/
 fused_weights/
 data/
